@@ -10,6 +10,9 @@ from unittest.mock import patch
 from vibemouse.config import AppConfig
 from vibemouse.doctor import (
     DoctorCheck,
+    _apply_doctor_fixes,
+    _ensure_user_service_active,
+    _fix_hyprland_return_bind_conflict,
     _check_hyprland_return_bind_conflict,
     _check_openclaw,
     _parse_openclaw_command,
@@ -132,6 +135,59 @@ class DoctorHelpersTests(unittest.TestCase):
         self.assertEqual(check.status, "fail")
         self.assertIn("permission denied", check.detail)
 
+    def test_fix_hyprland_return_bind_conflict_comments_conflicting_lines(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vibemouse-doctor-fix-") as tmp:
+            bind_path = (
+                Path(tmp) / ".config" / "hypr" / "UserConfigs" / "UserKeybinds.conf"
+            )
+            bind_path.parent.mkdir(parents=True, exist_ok=True)
+            _ = bind_path.write_text(
+                "bind = , mouse:275, sendshortcut, , Return, activewindow\n"
+                "bind = , mouse:276, sendshortcut, , Return, activewindow\n",
+                encoding="utf-8",
+            )
+
+            with (
+                patch("vibemouse.doctor.Path.home", return_value=Path(tmp)),
+                patch("vibemouse.doctor._run_subprocess") as run_subprocess,
+            ):
+                _fix_hyprland_return_bind_conflict()
+
+            content = bind_path.read_text(encoding="utf-8")
+            self.assertIn("auto-disabled by vibemouse doctor --fix", content)
+            self.assertEqual(run_subprocess.call_count, 1)
+
+    def test_ensure_user_service_active_restarts_when_inactive(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], *, timeout: float) -> SimpleNamespace:
+            _ = timeout
+            calls.append(cmd)
+            if cmd[-2:] == ["is-active", "vibemouse.service"]:
+                return SimpleNamespace(returncode=3, stdout="inactive\n")
+            return SimpleNamespace(returncode=0, stdout="")
+
+        with patch("vibemouse.doctor._run_subprocess", side_effect=fake_run):
+            _ensure_user_service_active()
+
+        self.assertEqual(
+            calls,
+            [
+                ["systemctl", "--user", "is-active", "vibemouse.service"],
+                ["systemctl", "--user", "restart", "vibemouse.service"],
+            ],
+        )
+
+    def test_apply_doctor_fixes_runs_both_fixers(self) -> None:
+        with (
+            patch("vibemouse.doctor._fix_hyprland_return_bind_conflict") as fix_bind,
+            patch("vibemouse.doctor._ensure_user_service_active") as fix_service,
+        ):
+            _apply_doctor_fixes()
+
+        self.assertEqual(fix_bind.call_count, 1)
+        self.assertEqual(fix_service.call_count, 1)
+
 
 class DoctorCommandTests(unittest.TestCase):
     def test_run_doctor_returns_nonzero_when_fail_exists(self) -> None:
@@ -157,3 +213,48 @@ class DoctorCommandTests(unittest.TestCase):
             rc = run_doctor()
 
         self.assertEqual(rc, 1)
+
+    def test_run_doctor_with_fix_invokes_fix_path(self) -> None:
+        with (
+            patch("vibemouse.doctor._apply_doctor_fixes") as apply_fixes,
+            patch(
+                "vibemouse.doctor._check_config_load",
+                return_value=(
+                    DoctorCheck("config", "ok", "ok"),
+                    cast(
+                        AppConfig,
+                        cast(
+                            object,
+                            SimpleNamespace(
+                                openclaw_command="openclaw",
+                                openclaw_agent="main",
+                                rear_button="x2",
+                                sample_rate=16000,
+                                channels=1,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            patch("vibemouse.doctor._check_openclaw", return_value=[]),
+            patch(
+                "vibemouse.doctor._check_audio_input",
+                return_value=DoctorCheck("audio", "ok", "ok"),
+            ),
+            patch(
+                "vibemouse.doctor._check_input_device_permissions",
+                return_value=DoctorCheck("input", "ok", "ok"),
+            ),
+            patch(
+                "vibemouse.doctor._check_hyprland_return_bind_conflict",
+                return_value=DoctorCheck("bind", "ok", "ok"),
+            ),
+            patch(
+                "vibemouse.doctor._check_user_service_state",
+                return_value=DoctorCheck("service", "ok", "ok"),
+            ),
+        ):
+            rc = run_doctor(apply_fixes=True)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(apply_fixes.call_count, 1)

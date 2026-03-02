@@ -20,7 +20,10 @@ class DoctorCheck:
     detail: str
 
 
-def run_doctor() -> int:
+def run_doctor(*, apply_fixes: bool = False) -> int:
+    if apply_fixes:
+        _apply_doctor_fixes()
+
     checks: list[DoctorCheck] = []
 
     config_check, config = _check_config_load()
@@ -41,6 +44,70 @@ def run_doctor() -> int:
     warn_count = sum(1 for check in checks if check.status == "warn")
     print(f"Doctor summary: {len(checks)} checks, {fail_count} fail, {warn_count} warn")
     return 1 if fail_count else 0
+
+
+def _apply_doctor_fixes() -> None:
+    _fix_hyprland_return_bind_conflict()
+    _ensure_user_service_active()
+
+
+def _fix_hyprland_return_bind_conflict() -> None:
+    bind_path = Path.home() / ".config/hypr/UserConfigs/UserKeybinds.conf"
+    if not bind_path.exists():
+        return
+
+    try:
+        lines = bind_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return
+
+    changed = False
+    rewritten: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if (
+            stripped.startswith("#")
+            or "sendshortcut" not in stripped
+            or "Return" not in stripped
+        ):
+            rewritten.append(line)
+            continue
+
+        if "mouse:275" in stripped or "mouse:276" in stripped:
+            rewritten.append(f"# {line} # auto-disabled by vibemouse doctor --fix")
+            changed = True
+            continue
+
+        rewritten.append(line)
+
+    if not changed:
+        return
+
+    try:
+        bind_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+    except OSError:
+        return
+
+    _ = _run_subprocess(
+        ["hyprctl", "reload", "config-only"],
+        timeout=3.0,
+    )
+
+
+def _ensure_user_service_active() -> None:
+    probe = _run_subprocess(
+        ["systemctl", "--user", "is-active", "vibemouse.service"],
+        timeout=3.0,
+    )
+    if probe is None:
+        return
+    if probe.returncode == 0 and probe.stdout.strip() == "active":
+        return
+
+    _ = _run_subprocess(
+        ["systemctl", "--user", "restart", "vibemouse.service"],
+        timeout=8.0,
+    )
 
 
 def _check_config_load() -> tuple[DoctorCheck, AppConfig | None]:
@@ -477,19 +544,15 @@ def _check_hyprland_return_bind_conflict(config: AppConfig | None) -> DoctorChec
 
 
 def _check_user_service_state() -> DoctorCheck:
-    try:
-        probe = subprocess.run(
-            ["systemctl", "--user", "is-active", "vibemouse.service"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=3.0,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    probe = _run_subprocess(
+        ["systemctl", "--user", "is-active", "vibemouse.service"],
+        timeout=3.0,
+    )
+    if probe is None:
         return DoctorCheck(
             name="user-service",
             status="warn",
-            detail=f"could not query service state: {error}",
+            detail="could not query service state",
         )
 
     state = probe.stdout.strip() or "unknown"
@@ -505,6 +568,23 @@ def _check_user_service_state() -> DoctorCheck:
         status="warn",
         detail=f"vibemouse.service state is {state}",
     )
+
+
+def _run_subprocess(
+    cmd: list[str],
+    *,
+    timeout: float,
+) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def _parse_openclaw_command(raw: str) -> list[str] | None:
