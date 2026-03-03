@@ -111,12 +111,18 @@ class SideButtonListener:
         ecodes = cast(_Ecodes, getattr(evdev_module, "ecodes"))
         list_devices = cast(_ListDevicesFn, getattr(evdev_module, "list_devices"))
 
-        side_codes = {
-            "x1": ecodes.BTN_SIDE,
-            "x2": ecodes.BTN_EXTRA,
+        side_code_candidates = {
+            "x1": {
+                ecodes.BTN_SIDE,
+                int(getattr(ecodes, "BTN_BACK", ecodes.BTN_SIDE)),
+            },
+            "x2": {
+                ecodes.BTN_EXTRA,
+                int(getattr(ecodes, "BTN_FORWARD", ecodes.BTN_EXTRA)),
+            },
         }
-        front_code = side_codes[self._front_button]
-        rear_code = side_codes[self._rear_button]
+        front_codes = side_code_candidates[self._front_button]
+        rear_codes = side_code_candidates[self._rear_button]
         trigger_code: int | None = None
         if self._gestures_enabled and self._gesture_trigger_button == "right":
             trigger_code = ecodes.BTN_RIGHT
@@ -130,7 +136,7 @@ class SideButtonListener:
             try:
                 caps = dev.capabilities()
                 key_cap = caps.get(ecodes.EV_KEY, [])
-                required_codes = {front_code, rear_code}
+                required_codes = {*front_codes, *rear_codes}
                 if trigger_code is not None:
                     required_codes.add(trigger_code)
                 if not any(code in key_cap for code in required_codes):
@@ -161,9 +167,9 @@ class SideButtonListener:
                     for event in dev.read():
                         if event.type == ecodes.EV_KEY:
                             button_label: str | None = None
-                            if event.code == front_code:
+                            if event.code in front_codes:
                                 button_label = "front"
-                            elif event.code == rear_code:
+                            elif event.code in rear_codes:
                                 button_label = "rear"
                             elif (
                                 trigger_code is not None and event.code == trigger_code

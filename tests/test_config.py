@@ -44,7 +44,7 @@ class LoadConfigTests(unittest.TestCase):
 
         self.assertTrue(config.trust_remote_code)
 
-    def test_backend_can_be_overridden(self) -> None:
+    def test_backend_value_is_retained_in_config(self) -> None:
         with patch.dict(os.environ, {"VIBEMOUSE_BACKEND": "funasr"}, clear=True):
             config = load_config()
 

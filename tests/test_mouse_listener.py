@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from collections.abc import Callable
+from importlib import import_module as _real_import_module
 from typing import cast
 from unittest.mock import patch
 
@@ -151,3 +152,88 @@ class SideButtonListenerGestureTests(unittest.TestCase):
             finish_capture("right")
 
         self.assertEqual(restore_mock.call_count, 0)
+
+    def test_back_forward_aliases_match_x1_x2(self) -> None:
+        class _FakeEvent:
+            def __init__(self, event_type: int, code: int, value: int) -> None:
+                self.type = event_type
+                self.code = code
+                self.value = value
+
+        class _FakeDevice:
+            def __init__(self, events: list[_FakeEvent], key_cap: list[int]) -> None:
+                self.fd = 77
+                self._events = events
+                self._key_cap = key_cap
+
+            def capabilities(self) -> dict[int, list[int]]:
+                return {1: self._key_cap}
+
+            def read(self) -> list[_FakeEvent]:
+                events = self._events
+                self._events = []
+                return events
+
+            def close(self) -> None:
+                return
+
+        events = [_FakeEvent(1, 278, 1), _FakeEvent(1, 277, 1)]
+        fake_device = _FakeDevice(events=events, key_cap=[272, 277, 278])
+        callbacks: list[str] = []
+
+        def _on_front() -> None:
+            callbacks.append("front")
+
+        def _on_rear() -> None:
+            callbacks.append("rear")
+            listener._stop.set()
+
+        listener = SideButtonListener(
+            on_front_press=_on_front,
+            on_rear_press=_on_rear,
+            front_button="x1",
+            rear_button="x2",
+        )
+
+        fake_ecodes = type(
+            "_Ecodes",
+            (),
+            {
+                "BTN_SIDE": 275,
+                "BTN_EXTRA": 276,
+                "BTN_BACK": 278,
+                "BTN_FORWARD": 277,
+                "BTN_LEFT": 272,
+                "BTN_RIGHT": 273,
+                "EV_KEY": 1,
+                "EV_REL": 2,
+                "REL_X": 0,
+                "REL_Y": 1,
+            },
+        )
+        fake_module = type(
+            "_EvdevModule",
+            (),
+            {
+                "InputDevice": lambda _path: fake_device,
+                "ecodes": fake_ecodes,
+                "list_devices": lambda: ["/dev/input/event-test"],
+            },
+        )
+
+        def _import_module(name: str):
+            if name == "evdev":
+                return fake_module
+            return _real_import_module(name)
+
+        with (
+            patch(
+                "vibemouse.mouse_listener.importlib.import_module",
+                side_effect=_import_module,
+            ),
+            patch("select.select", return_value=([77], [], [])),
+        ):
+            run_evdev = cast(Callable[[], None], getattr(listener, "_run_evdev"))
+            run_evdev()
+
+        self.assertEqual(callbacks, ["front", "rear"])
